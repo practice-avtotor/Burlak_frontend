@@ -7,70 +7,127 @@ export function useChunkedUpload() {
   const isUploading = ref(false);
   const progress = ref(0);
   const error = ref<string | null>(null);
+  const uploadedChunks = ref(0);
+  const totalChunks = ref(0);
   
-  // Загрузка файла
+  // 🔪 НАРЕЗКА ЧЕРЕЗ WEB WORKER
+  const splitFileInWorker = (file: File): Promise<Blob[]> => {
+    return new Promise((resolve, reject) => {
+      try {
+        const worker = new Worker(
+          new URL('@/workers/chunker.worker.ts', import.meta.url),
+          { type: 'module' }
+        );
+        
+        worker.postMessage({ file, chunkSize: CHUNK_SIZE });
+        
+        worker.onmessage = (e) => {
+          if (e.data.type === 'complete') {
+            resolve(e.data.chunks);
+            worker.terminate();
+          }
+          if (e.data.type === 'progress') {
+            console.log(`🔄 Нарезка: ${Math.round(e.data.value)}%`);
+          }
+        };
+        
+        worker.onerror = (err) => {
+          reject(err);
+          worker.terminate();
+        };
+      } catch (err) {
+        reject(err);
+      }
+    });
+  };
+
   const uploadFile = async (file: File) => {
     isUploading.value = true;
     progress.value = 0;
     error.value = null;
+    uploadedChunks.value = 0;
+    
+    totalChunks.value = Math.ceil(file.size / CHUNK_SIZE);
+    
+    console.log(`📦 Файл: ${file.name}`);
+    console.log(`📊 Размер: ${(file.size / 1024 / 1024).toFixed(2)} МБ`);
+    console.log(`📊 Всего чанков: ${totalChunks.value}`);
     
     try {
-      const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-      console.log(`📦 Файл: ${file.name}, размер: ${file.size} байт, чанков: ${totalChunks}`);
+      // 1. Нарезка через Worker (в фоне)
+      console.log('🔄 Нарезка файла на чанки...');
+      const chunks = await splitFileInWorker(file);
       
-      // Загружаем чанки
-      for (let i = 0; i < totalChunks; i++) {
-        const start = i * CHUNK_SIZE;
-        const end = Math.min(start + CHUNK_SIZE, file.size);
+      console.log(`✅ Нарезано ${chunks.length} чанков`);
+      
+      // 2. Загружаем каждый чанк
+      for (let i = 0; i < chunks.length; i++) {
+        // ПРОВЕРКА: убеждаемся, что чанк существует
+        const chunk = chunks[i];
+        if (!chunk) {
+          throw new Error(`Чанк ${i} не существует`);
+        }
         
-        //  Создаём чанк через slice
-        const chunk = file.slice(start, end);
+        // ПРОВЕРКА: убеждаемся, что это Blob
+        if (!(chunk instanceof Blob)) {
+          throw new Error(`Чанк ${i} не является Blob`);
+        }
         
-        console.log(`📤 Чанк ${i + 1}/${totalChunks}: ${chunk.size} байт`);
+        // ПРОВЕРКА: чанк не пустой
+        if (chunk.size === 0) {
+          console.warn(`⚠️ Чанк ${i} пустой, пропускаем`);
+          continue;
+        }
         
-        // Создаём FormData
         const formData = new FormData();
-        
-        //  ПРОСТОЙ СПОСОБ: добавляем чанк без имени файла
         formData.append('chunk', chunk);
         formData.append('chunkIndex', i.toString());
-        formData.append('totalChunks', totalChunks.toString());
+        formData.append('totalChunks', chunks.length.toString());
         formData.append('fileName', file.name);
         
-        // Отправляем на сервер
-        const response = await fetch('/api/upload-chunk', {
-          method: 'POST',
-          body: formData,
-        });
+        console.log(` Отправка чанка ${i + 1}/${chunks.length} (${chunk.size} байт)`);
         
-        if (!response.ok) {
-          throw new Error(`Ошибка загрузки чанка ${i + 1}: ${response.status}`);
+        // Симуляция загрузки (без бэкенда)
+        if (import.meta.env.DEV) {
+          await new Promise(resolve => setTimeout(resolve, 150));
+        } else {
+          const response = await fetch('/api/upload-chunk', {
+            method: 'POST',
+            body: formData,
+          });
+          
+          if (!response.ok) {
+            throw new Error(`Ошибка загрузки чанка ${i + 1}: ${response.status}`);
+          }
         }
         
         // Обновляем прогресс
-        progress.value = ((i + 1) / totalChunks) * 100;
+        uploadedChunks.value = i + 1;
+        progress.value = ((i + 1) / chunks.length) * 100;
       }
       
       console.log('✅ Все чанки загружены!');
       
-      // Запускаем обработку
-      const processResponse = await fetch('/api/process', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fileName: file.name }),
-      });
-      
-      if (!processResponse.ok) {
-        throw new Error(`Ошибка запуска обработки: ${processResponse.status}`);
+      // 3. Симуляция обработки
+      if (import.meta.env.DEV) {
+        console.log('🔄 Симуляция обработки на сервере...');
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        console.log('🎉 Обработка завершена!');
+      } else {
+        const processResponse = await fetch('/api/process', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fileName: file.name }),
+        });
+        
+        if (!processResponse.ok) {
+          throw new Error(`Ошибка запуска обработки: ${processResponse.status}`);
+        }
+        
+        const { processId } = await processResponse.json();
+        console.log(`🔄 Обработка запущена (${processId})`);
+        await pollStatus(processId);
       }
-      
-      const { processId } = await processResponse.json();
-      console.log(`🔄 Обработка запущена (${processId})`);
-      
-      // Опрашиваем статус
-      await pollStatus(processId);
-      
-      console.log('🎉 Готово!');
       
     } catch (err) {
       error.value = (err as Error).message;
@@ -81,7 +138,7 @@ export function useChunkedUpload() {
     }
   };
   
-  // Опрос статуса
+  // Опрос статуса (для реального бэкенда)
   const pollStatus = async (processId: string): Promise<void> => {
     return new Promise((resolve, reject) => {
       const interval = setInterval(async () => {
@@ -113,10 +170,20 @@ export function useChunkedUpload() {
     });
   };
   
-  return { 
-    uploadFile, 
-    isUploading, 
-    progress, 
+  // Отмена загрузки
+  const cancelUpload = () => {
+    isUploading.value = false;
+    error.value = 'Загрузка отменена';
+    console.log('⏹ Загрузка отменена');
+  };
+  
+  return {
+    uploadFile,
+    isUploading,
+    progress,
     error,
+    uploadedChunks,
+    totalChunks,
+    cancelUpload,
   };
 }
