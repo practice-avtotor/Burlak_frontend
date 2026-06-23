@@ -1,132 +1,94 @@
 // src/composables/useChunkedUpload.ts
 import { ref } from 'vue';
+import {
+  createJob,
+  uploadChunk,
+  completeUpload,
+  startProcessing,
+  getJobStatus,
+  downloadDiff,
+  downloadCards,
+  type Job,
+} from '@/lib/api';
 
-const CHUNK_SIZE = 10 * 1024 * 1024; // 10 МБ
+const CHUNK_SIZE = 20 * 1024 * 1024; // 20 МБ (по документации)
 
 export function useChunkedUpload() {
   const isUploading = ref(false);
   const progress = ref(0);
   const error = ref<string | null>(null);
+  const jobId = ref<string | null>(null);
+  const jobStatus = ref<Job | null>(null);
+  
   const uploadedChunks = ref(0);
   const totalChunks = ref(0);
-  
-  // 🔪 НАРЕЗКА ЧЕРЕЗ WEB WORKER
-  const splitFileInWorker = (file: File): Promise<Blob[]> => {
-    return new Promise((resolve, reject) => {
-      try {
-        const worker = new Worker(
-          new URL('@/workers/chunker.worker.ts', import.meta.url),
-          { type: 'module' }
-        );
-        
-        worker.postMessage({ file, chunkSize: CHUNK_SIZE });
-        
-        worker.onmessage = (e) => {
-          if (e.data.type === 'complete') {
-            resolve(e.data.chunks);
-            worker.terminate();
-          }
-          if (e.data.type === 'progress') {
-            console.log(`🔄 Нарезка: ${Math.round(e.data.value)}%`);
-          }
-        };
-        
-        worker.onerror = (err) => {
-          reject(err);
-          worker.terminate();
-        };
-      } catch (err) {
-        reject(err);
-      }
-    });
-  };
+  const currentRole = ref<'bom' | 'archive'>('bom');
 
-  const uploadFile = async (file: File) => {
+  const uploadFile = async (file: File, role: 'bom' | 'archive') => {
     isUploading.value = true;
     progress.value = 0;
     error.value = null;
-    uploadedChunks.value = 0;
+    currentRole.value = role;
+    
+    // 1. Создаём задачу
+    if (!jobId.value) {
+      const job = await createJob();
+      jobId.value = job.id;
+      console.log(`📋 Создана задача: ${jobId.value}`);
+    }
     
     totalChunks.value = Math.ceil(file.size / CHUNK_SIZE);
-    
-    console.log(`📦 Файл: ${file.name}`);
+    console.log(`📦 Файл: ${file.name} (${role})`);
     console.log(`📊 Размер: ${(file.size / 1024 / 1024).toFixed(2)} МБ`);
     console.log(`📊 Всего чанков: ${totalChunks.value}`);
     
     try {
-      // 1. Нарезка через Worker (в фоне)
-      console.log('🔄 Нарезка файла на чанки...');
-      const chunks = await splitFileInWorker(file);
-      
-      console.log(`✅ Нарезано ${chunks.length} чанков`);
-      
-      // 2. Загружаем каждый чанк
-      for (let i = 0; i < chunks.length; i++) {
-        // ПРОВЕРКА: убеждаемся, что чанк существует
-        const chunk = chunks[i];
-        if (!chunk) {
-          throw new Error(`Чанк ${i} не существует`);
-        }
+      // 2. Нарезка и загрузка чанков (строго по порядку!)
+      for (let i = 0; i < totalChunks.value; i++) {
+        const start = i * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, file.size);
+        const chunk = file.slice(start, end);
         
-        // ПРОВЕРКА: убеждаемся, что это Blob
-        if (!(chunk instanceof Blob)) {
-          throw new Error(`Чанк ${i} не является Blob`);
-        }
-        
-        // ПРОВЕРКА: чанк не пустой
         if (chunk.size === 0) {
           console.warn(`⚠️ Чанк ${i} пустой, пропускаем`);
           continue;
         }
         
-        const formData = new FormData();
-        formData.append('chunk', chunk);
-        formData.append('chunkIndex', i.toString());
-        formData.append('totalChunks', chunks.length.toString());
-        formData.append('fileName', file.name);
+        console.log(`📤 Отправка чанка ${i + 1}/${totalChunks.value} (${chunk.size} байт)`);
         
-        console.log(` Отправка чанка ${i + 1}/${chunks.length} (${chunk.size} байт)`);
-        
-        // Симуляция загрузки (без бэкенда)
-        if (import.meta.env.DEV) {
-          await new Promise(resolve => setTimeout(resolve, 150));
-        } else {
-          const response = await fetch('/api/upload-chunk', {
-            method: 'POST',
-            body: formData,
-          });
-          
-          if (!response.ok) {
-            throw new Error(`Ошибка загрузки чанка ${i + 1}: ${response.status}`);
+        // ✅ Загрузка чанка с повтором (идемпотентность)
+        let retries = 0;
+        let success = false;
+        while (!success && retries < 3) {
+          try {
+            await uploadChunk(jobId.value!, role, i, chunk, totalChunks.value);
+            success = true;
+          } catch (err) {
+            retries++;
+            console.warn(`⚠️ Повторная попытка ${retries}/3 для чанка ${i}`);
+            if (retries >= 3) throw err;
+            await new Promise(resolve => setTimeout(resolve, 1000 * retries));
           }
         }
         
-        // Обновляем прогресс
         uploadedChunks.value = i + 1;
-        progress.value = ((i + 1) / chunks.length) * 100;
+        progress.value = ((i + 1) / totalChunks.value) * 100;
       }
       
-      console.log('✅ Все чанки загружены!');
+      console.log(`✅ Все чанки ${role} загружены!`);
       
-      // 3. Симуляция обработки
-      if (import.meta.env.DEV) {
-        console.log('🔄 Симуляция обработки на сервере...');
-        await new Promise(resolve => setTimeout(resolve, 1500));
-        console.log('🎉 Обработка завершена!');
-      } else {
-        const processResponse = await fetch('/api/process', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ fileName: file.name }),
-        });
+      // 3. Завершаем загрузку файла
+      await completeUpload(jobId.value!, role);
+      console.log(`✅ Загрузка ${role} завершена`);
+      
+      // 4. Если это archive — запускаем обработку
+      if (role === 'archive') {
+        console.log('🔄 Запуск обработки...');
+        await startProcessing(jobId.value!);
+        console.log('✅ Обработка запущена');
         
-        if (!processResponse.ok) {
-          throw new Error(`Ошибка запуска обработки: ${processResponse.status}`);
-        }
-        
-        const { processId } = await processResponse.json();
-        console.log(`🔄 Обработка запущена (${processId})`);
-        await pollStatus(processId);
+        // 5. Опрашиваем статус
+        await pollStatus(jobId.value!);
       }
       
     } catch (err) {
@@ -138,43 +100,43 @@ export function useChunkedUpload() {
     }
   };
   
-  // Опрос статуса (для реального бэкенда)
-  const pollStatus = async (processId: string): Promise<void> => {
+  const pollStatus = async (id: string): Promise<void> => {
     return new Promise((resolve, reject) => {
       const interval = setInterval(async () => {
         try {
-          const response = await fetch(`/api/status/${processId}`);
+          const status = await getJobStatus(id);
+          jobStatus.value = status;
+          console.log(`📊 Статус: ${status.status}, этап: ${status.stage}`);
           
-          if (!response.ok) {
-            if (response.status === 404) {
-              console.log('⏳ Ожидание статуса...');
-              return;
-            }
-            throw new Error(`Ошибка получения статуса: ${response.status}`);
-          }
-          
-          const data = await response.json();
-          console.log(`📊 Статус: ${data.status}`);
-          
-          if (data.status === 'completed') {
+          if (status.status === 'done') {
             clearInterval(interval);
             resolve();
-          } else if (data.status === 'error') {
+          } else if (status.status === 'error') {
             clearInterval(interval);
-            reject(new Error('Ошибка обработки на сервере'));
+            reject(new Error(status.error || 'Ошибка обработки'));
           }
         } catch (err) {
           console.error('Ошибка опроса:', err);
         }
-      }, 2000);
+      }, 3000);
     });
   };
   
-  // Отмена загрузки
-  const cancelUpload = () => {
-    isUploading.value = false;
-    error.value = 'Загрузка отменена';
-    console.log('⏹ Загрузка отменена');
+  const downloadDiffResult = () => {
+    if (jobId.value) downloadDiff(jobId.value);
+  };
+  
+  const downloadCardsResult = () => {
+    if (jobId.value) downloadCards(jobId.value);
+  };
+  
+  const resetJob = () => {
+    jobId.value = null;
+    jobStatus.value = null;
+    uploadedChunks.value = 0;
+    totalChunks.value = 0;
+    progress.value = 0;
+    error.value = null;
   };
   
   return {
@@ -182,8 +144,13 @@ export function useChunkedUpload() {
     isUploading,
     progress,
     error,
+    jobId,
+    jobStatus,
     uploadedChunks,
     totalChunks,
-    cancelUpload,
+    currentRole,
+    downloadDiffResult,
+    downloadCardsResult,
+    resetJob,
   };
 }

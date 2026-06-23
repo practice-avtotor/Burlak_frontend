@@ -1,21 +1,110 @@
+<template>
+  <div class="uploader">
+    <h1>📁 Burlak</h1>
+    <p class="subtitle">Загрузка BOM-файла и архива с картами</p>
+
+    <!-- Статус задачи -->
+    <div v-if="jobId" class="job-status">
+      <span class="job-id">📋 Задача: {{ jobId }}</span>
+      <span class="job-stage" v-if="jobStatus">
+        {{ jobStatus.stage }}
+      </span>
+    </div>
+
+    <!-- Зона загрузки BOM -->
+    <div 
+      class="dropzone"
+      :class="{ dragging: isDraggingBom }"
+      @dragenter="isDraggingBom = true"
+      @dragleave="isDraggingBom = false"
+      @dragover.prevent
+      @drop.prevent="handleDropBom"
+    >
+      <div class="dropzone-content">
+        <span class="icon">📊</span>
+        <p>Загрузите BOM-файл (XLSX)</p>
+        <button @click="selectBomFile" class="btn">Выбрать BOM</button>
+        <input type="file" ref="bomInput" accept=".xlsx" @change="handleBomSelect" style="display: none">
+      </div>
+      <div v-if="bomFile" class="selected-file">
+        ✅ {{ bomFile.name }} ({{ formatSize(bomFile.size) }})
+      </div>
+    </div>
+
+    <!-- Зона загрузки Archive -->
+    <div 
+      class="dropzone"
+      :class="{ dragging: isDraggingArchive }"
+      @dragenter="isDraggingArchive = true"
+      @dragleave="isDraggingArchive = false"
+      @dragover.prevent
+      @drop.prevent="handleDropArchive"
+    >
+      <div class="dropzone-content">
+        <span class="icon">📦</span>
+        <p>Загрузите архив с картами (ZIP)</p>
+        <button @click="selectArchiveFile" class="btn">Выбрать архив</button>
+        <input type="file" ref="archiveInput" accept=".zip" @change="handleArchiveSelect" style="display: none">
+      </div>
+      <div v-if="archiveFile" class="selected-file">
+        ✅ {{ archiveFile.name }} ({{ formatSize(archiveFile.size) }})
+      </div>
+    </div>
+
+    <!-- Прогресс загрузки -->
+    <div v-if="isUploading" class="uploading-status">
+      <div class="progress-info">
+        <span class="progress-label">⬆ {{ currentRole === 'bom' ? 'BOM' : 'Архив' }}</span>
+        <span class="progress-percent">{{ Math.round(progress) }}%</span>
+      </div>
+      <div class="progress-bar">
+        <div class="progress-fill" :style="{ width: progress + '%' }"></div>
+      </div>
+      <div v-if="totalChunks > 0" class="chunks-info">
+        📦 Чанк {{ uploadedChunks }} из {{ totalChunks }}
+      </div>
+    </div>
+
+    <!-- Скачивание результатов -->
+    <div v-if="jobStatus?.status === 'done'" class="download-section">
+      <h3>📥 Результаты готовы</h3>
+      <div class="download-buttons">
+        <button class="btn btn-download" @click="downloadDiffResult">📊 Скачать diff.xlsx</button>
+        <button class="btn btn-download" @click="downloadCardsResult">📦 Скачать translated_cards.zip</button>
+      </div>
+    </div>
+
+    <!-- Ошибка -->
+    <div v-if="error" class="error-message">
+      ❌ {{ error }}
+    </div>
+  </div>
+</template>
+
 <script setup lang="ts">
 import { ref, watch } from 'vue';
 import { useChunkedUpload } from '@/composables/useChunkedUpload';
 
-const { uploadFile, isUploading, progress, uploadedChunks, totalChunks } = useChunkedUpload();
+const {
+  uploadFile,
+  isUploading,
+  progress,
+  error,
+  jobId,
+  jobStatus,
+  uploadedChunks,
+  totalChunks,
+  currentRole,
+  downloadDiffResult,
+  downloadCardsResult,
+} = useChunkedUpload();
 
-const files = ref<Array<{
-  id: number;
-  name: string;
-  size: number;
-  status: 'uploading' | 'done' | 'error';
-  statusText: string;
-  uploadedChunks?: number;
-  totalChunks?: number;
-}>>([]);
-
-const isDragging = ref(false);
-const fileInput = ref<HTMLInputElement | null>(null);
+const bomFile = ref<File | null>(null);
+const archiveFile = ref<File | null>(null);
+const isDraggingBom = ref(false);
+const isDraggingArchive = ref(false);
+const bomInput = ref<HTMLInputElement | null>(null);
+const archiveInput = ref<HTMLInputElement | null>(null);
 
 const formatSize = (bytes: number): string => {
   if (bytes === 0) return '0 B';
@@ -25,95 +114,104 @@ const formatSize = (bytes: number): string => {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 };
 
-// Следим за прогрессом и обновляем текущий файл
-watch([progress, uploadedChunks, totalChunks], () => {
-  const uploadingFile = files.value.find(f => f.status === 'uploading');
-  if (uploadingFile) {
-    uploadingFile.uploadedChunks = uploadedChunks.value;
-    uploadingFile.totalChunks = totalChunks.value;
-  }
-});
+const selectBomFile = () => bomInput.value?.click();
+const selectArchiveFile = () => archiveInput.value?.click();
 
-const selectFile = () => {
-  fileInput.value?.click();
-};
-
-const handleFileSelect = async (e: Event) => {
+const handleBomSelect = async (e: Event) => {
   const target = e.target as HTMLInputElement;
-  const selectedFiles = Array.from(target.files || []);
-  for (const file of selectedFiles) {
-    await uploadFileHandler(file);
+  const file = target.files?.[0];
+  if (file) {
+    bomFile.value = file;
+    await uploadFile(file, 'bom');
   }
   target.value = '';
 };
 
-const handleDrop = async (e: DragEvent) => {
-  isDragging.value = false;
-  const droppedFiles = Array.from(e.dataTransfer?.files || []);
-  for (const file of droppedFiles) {
-    await uploadFileHandler(file);
+const handleArchiveSelect = async (e: Event) => {
+  const target = e.target as HTMLInputElement;
+  const file = target.files?.[0];
+  if (file) {
+    archiveFile.value = file;
+    await uploadFile(file, 'archive');
+  }
+  target.value = '';
+};
+
+const handleDropBom = async (e: DragEvent) => {
+  isDraggingBom.value = false;
+  const file = e.dataTransfer?.files?.[0];
+  if (file) {
+    bomFile.value = file;
+    await uploadFile(file, 'bom');
   }
 };
 
-const uploadFileHandler = async (file: File) => {
-  const id = Date.now();
-  const totalChunksCount = Math.ceil(file.size / (10 * 1024 * 1024));
-  
-  const newFile = {
-    id,
-    name: file.name,
-    size: file.size,
-    status: 'uploading' as const,
-    statusText: 'Загрузка...',
-    uploadedChunks: 0,
-    totalChunks: totalChunksCount,
-  };
-  files.value.push(newFile);
-  
-  try {
-    await uploadFile(file);
-    const item = files.value.find(f => f.id === id);
-    if (item) {
-      item.status = 'done';
-      item.statusText = 'Готово ✅';
-    }
-  } catch (err) {
-    const item = files.value.find(f => f.id === id);
-    if (item) {
-      item.status = 'error';
-      item.statusText = 'Ошибка ❌';
-    }
+const handleDropArchive = async (e: DragEvent) => {
+  isDraggingArchive.value = false;
+  const file = e.dataTransfer?.files?.[0];
+  if (file) {
+    archiveFile.value = file;
+    await uploadFile(file, 'archive');
   }
-};
-
-// ✅ ОБНОВЛЕНО: симуляция скачивания
-const downloadResult = (id: number) => {
-  // Находим файл по ID
-  const file = files.value.find(f => f.id === id);
-  const fileName = file?.name || 'result';
-  
-  // Создаём тестовый файл
-  const content = `Результат обработки файла "${fileName}"\n`;
-  const blob = new Blob([content], { type: 'text/plain' });
-  const url = URL.createObjectURL(blob);
-  
-  // Скачиваем
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `result_${fileName}.txt`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-  
-  console.log(`📥 Скачивание симулировано для файла #${id} (${fileName})`);
-};
-
-const removeFile = (id: number) => {
-  files.value = files.value.filter(f => f.id !== id);
-};
-
-const clearCompleted = () => {
-  files.value = files.value.filter(f => f.status !== 'done');
 };
 </script>
+
+<style scoped>
+/* ... твои стили + новые */
+.job-status {
+  display: flex;
+  justify-content: space-between;
+  padding: 8px 16px;
+  background: #f1f5f9;
+  border-radius: 8px;
+  margin-bottom: 16px;
+  font-size: 13px;
+}
+
+.job-id {
+  font-family: monospace;
+  color: #4f46e5;
+}
+
+.job-stage {
+  background: #4f46e5;
+  color: white;
+  padding: 2px 12px;
+  border-radius: 20px;
+}
+
+.selected-file {
+  margin-top: 12px;
+  font-size: 14px;
+  color: #10b981;
+}
+
+.download-section {
+  margin-top: 24px;
+  padding: 16px;
+  background: #f0fdf4;
+  border-radius: 12px;
+  border: 1px solid #bbf7d0;
+}
+
+.download-section h3 {
+  font-size: 16px;
+  margin-bottom: 12px;
+  color: #16a34a;
+}
+
+.download-buttons {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.error-message {
+  margin-top: 16px;
+  padding: 12px 16px;
+  background: #fef2f2;
+  border-radius: 8px;
+  color: #dc2626;
+  border: 1px solid #fca5a5;
+}
+</style>
