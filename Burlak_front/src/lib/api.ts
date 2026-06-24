@@ -39,49 +39,70 @@ export class ApiError extends Error {
   }
 }
 
-// --- ОБРАБОТКА ОТВЕТОВ ---
+// --- ПАРСИНГ ОШИБОК ИЗ JSON ---
+
+const parseJsonError = async (response: Response): Promise<{
+  code: string;
+  message: string;
+  details?: Record<string, any>;
+}> => {
+  try {
+    const parsed = await response.json();
+    return {
+      code: parsed.code || 'UNKNOWN_ERROR',
+      message: parsed.message || parsed.error || 'Неизвестная ошибка',
+      details: parsed.details || parsed,
+    };
+  } catch {
+    return {
+      code: 'PARSE_ERROR',
+      message: 'Не удалось обработать ответ сервера',
+    };
+  }
+};
+
+// --- ПАРСИНГ ОШИБОК ИЗ ТЕКСТА ---
+
+const parseTextError = async (response: Response): Promise<string> => {
+  try {
+    const text = await response.text();
+    return text || `HTTP ${response.status}: ${response.statusText}`;
+  } catch {
+    return `HTTP ${response.status}: ${response.statusText}`;
+  }
+};
+
+// --- ОБРАБОТКА ОТВЕТА (единая функция) ---
 
 async function handleResponse<T>(response: Response): Promise<T> {
-  const contentType = response.headers.get('content-type');
-  const isJson = contentType?.includes('application/json');
-
+  // ✅ Ранний возврат для успешных ответов
   if (response.ok) {
+    const contentType = response.headers.get('content-type');
+    const isJson = contentType?.includes('application/json');
+    
     if (isJson) {
       return response.json();
     }
     return response as unknown as T;
   }
 
-  // ✅ Исправлено: явно указываем тип
+  // Обработка ошибок
+  const contentType = response.headers.get('content-type');
+  const isJson = contentType?.includes('application/json');
+
   let errorData: {
     code: string;
     message: string;
     details?: Record<string, any>;
-  } = {
-    code: 'UNKNOWN_ERROR',
-    message: `HTTP ${response.status}: ${response.statusText}`,
   };
 
   if (isJson) {
-    try {
-      const parsed = await response.json();
-      errorData = {
-        code: parsed.code || 'UNKNOWN_ERROR',
-        message: parsed.message || parsed.error || 'Неизвестная ошибка',
-        details: parsed.details || parsed,
-      };
-    } catch {
-      // Игнорируем
-    }
+    errorData = await parseJsonError(response);
   } else {
-    try {
-      const text = await response.text();
-      if (text) {
-        errorData.message = text;
-      }
-    } catch {
-      // Игнорируем
-    }
+    errorData = {
+      code: 'HTTP_ERROR',
+      message: await parseTextError(response),
+    };
   }
 
   throw new ApiError(response.status, errorData.code, errorData.message, errorData.details);
