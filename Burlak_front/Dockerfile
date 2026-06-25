@@ -13,7 +13,7 @@ RUN npm ci
 
 # Копируем исходники и собираем проект
 COPY . .
-RUN npm run build-only
+RUN npm run build
 
 # Стадия 2: Сервер для статики
 FROM node:20-alpine
