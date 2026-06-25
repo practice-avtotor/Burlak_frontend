@@ -125,8 +125,19 @@ const uploadFileHandler = async (file: File) => {
   files.value.push(newFile);
   
   try {
-    // Реальная загрузка с чанками
-    await uploadFile(file);
+    // ✅ ИСПРАВЛЕНО: определяем роль файла по расширению
+    let role: 'bom' | 'archive';
+    if (file.name.endsWith('.xlsx')) {
+      role = 'bom';
+    } else if (file.name.endsWith('.zip')) {
+      role = 'archive';
+    } else {
+      // По умолчанию — BOM
+      role = 'bom';
+    }
+    
+    // ✅ ИСПРАВЛЕНО: передаём role
+    await uploadFile(file, role);
     
     const item = files.value.find(f => f.id === id);
     if (item) {
