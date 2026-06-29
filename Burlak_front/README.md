@@ -42,6 +42,7 @@
 |------------|--------|
 | **Node.js** | ^20.0.0 или выше |
 | **npm** | ^10.0.0 или выше |
+| **Docker** | ^24.0.0 (опционально) |
 
 ---
 
@@ -64,12 +65,38 @@ npm install
 4. Запустить в режиме разработки
 bash
 npm run dev
-Приложение будет доступно по адресу: http://localhost:3000
+Приложение будет доступно: http://localhost:5173
 
 5. Собрать для продакшена
 bash
 npm run build
 Собранные файлы появятся в папке dist/.
+
+6. 🐳 Запуск через Docker
+Собрать образ
+bash
+docker build -t burlak-frontend .
+Запустить контейнер
+bash
+docker run --name burlak-frontend-container -p 5173:5173 burlak-frontend
+Приложение будет доступно: http://localhost:5173
+
+Полезные команды Docker
+bash
+# Остановить контейнер
+docker stop burlak-frontend-container
+
+# Запустить остановленный контейнер
+docker start burlak-frontend-container
+
+# Посмотреть логи
+docker logs burlak-frontend-container
+
+# Удалить контейнер
+docker rm burlak-frontend-container
+
+# Удалить образ
+docker rmi burlak-frontend
 
 📋 Команды
 Команда	Назначение
@@ -81,14 +108,14 @@ npm run format	Автоформатирование кода
 🔗 Интеграция с бэкендом
 Для работы с реальным бэкендом необходимо:
 
-Запустить бэкенд на http://localhost:8080 (или другом адресе)
+Запустить бэкенд на http://localhost:8000 (или другом адресе)
 
 Настроить прокси в vite.config.ts:
 
 typescript
 proxy: {
   '/api': {
-    target: 'http://localhost:8080',
+    target: 'http://localhost:8000',
     changeOrigin: true,
   },
 }
@@ -98,7 +125,7 @@ bash
 npm run dev
 📁 Структура проекта
 text
-burlak/
+Burlak_front/
 ├── src/
 │   ├── components/
 │   │   └── FileUploader.vue      # Главный компонент загрузки
@@ -117,6 +144,9 @@ burlak/
 │   └── vite-env.d.ts            # Типы для Vite
 ├── public/
 │   └── favicon.svg               # Иконка приложения
+├── dist/                          # Собранный проект
+├── Dockerfile                     # Docker-конфигурация
+├── .dockerignore                  # Исключения для Docker
 ├── index.html
 ├── package.json
 ├── vite.config.ts
