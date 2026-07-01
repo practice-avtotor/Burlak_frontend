@@ -125,7 +125,7 @@ bash
 npm run dev
 📁 Структура проекта
 text
-Burlak_front/
+Burlak_frontend/
 ├── src/
 │   ├── components/
 │   │   └── FileUploader.vue      # Главный компонент загрузки
